@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>哲学家进餐 · 并发死锁可视化</title>
+<style>
+:root{
+    --bg:#070b14; --line:#22304a; --ink:#e8eefb; --dim:#93a6c4; --accent:#38bdf8;
+    --think:#3b82f6; --hungry:#f59e0b; --eat:#10b981; --danger:#ef4444;
+    --stick:#b4c3da; --stick-held:#fb923c;
+    --ease:cubic-bezier(.22,.61,.36,1); --dur:.5s;
+}
+*{box-sizing:border-box}
+body{
+    margin:0;color:var(--ink);
+    background:radial-gradient(1100px 700px at 18% -12%, #16233b 0%, var(--bg) 62%);
+    font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1400px;margin:0 auto;padding:26px 22px 46px}
+
+/* ---------- 顶部 ---------- */
+.top{display:flex;gap:22px;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:21px;margin:0 0 6px;letter-spacing:.02em;font-weight:650}
+h1 em{font-style:normal;color:var(--accent)}
+.sub{margin:0;color:var(--dim);font-size:13.5px;max-width:74ch}
+.chips{display:flex;gap:16px;font-size:12.5px;color:var(--dim);flex-wrap:wrap}
+.chip{display:flex;align-items:center;gap:7px;white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;box-shadow:0 0 0 3px #ffffff0e}
+
+/* ---------- 版式 ---------- */
+main{display:grid;grid-template-columns:minmax(0,1fr) 336px;gap:18px;align-items:start}
+.card{background:linear-gradient(180deg,#131d31,#0e1626);border:1px solid var(--line);border-radius:16px;padding:16px}
+.card h2{margin:0 0 10px;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);font-weight:600}
+.col{display:grid;gap:18px}
+.stage-card{padding:14px}
+.log-card{margin-top:18px}
+@media (max-width:1020px){ main{grid-template-columns:1fr} }
+
+/* ---------- 舞台 ---------- */
+.stage{position:relative;width:100%;max-width:780px;aspect-ratio:1/1;margin:0 auto;overflow:hidden}
+.world{position:absolute;top:0;left:0;width:900px;height:900px;transform-origin:0 0}
+.table{position:absolute;left:50%;top:50%;width:480px;height:480px;transform:translate(-50%,-50%);border-radius:50%;
+    background:radial-gradient(circle at 42% 34%, #1d2d48, #101a2c 72%);
+    box-shadow:inset 0 0 0 1px #2a3b57, inset 0 -22px 50px #0007, 0 24px 60px #0008}
+.table::after{content:"";position:absolute;inset:26%;border-radius:50%;border:1px dashed #ffffff0d}
+.vignette{position:absolute;inset:0;border-radius:50%;pointer-events:none;opacity:0;transition:opacity .5s}
+.deadlock .vignette{opacity:1;box-shadow:0 0 0 3px #ef444455, inset 0 0 90px #ef444430;background:radial-gradient(circle,#ef444400 55%,#ef44441a 100%)}
+.links{position:absolute;inset:0;width:900px;height:900px;pointer-events:none;overflow:visible}
+.link{fill:none;stroke-width:2;opacity:0;transition:opacity .4s}
+.link.warm{stroke:#7d92b0;stroke-dasharray:5 6;opacity:.8}
+.link.hot{stroke:var(--danger);stroke-dasharray:7 7;opacity:.95;animation:flow 1s linear infinite}
+@keyframes flow{to{stroke-dashoffset:-14}}
+
+/* 餐盘 */
+.plate{position:absolute;left:0;top:0;width:104px;height:104px;border-radius:50%;
+    border:1.5px dashed #5b7391;
+    background:radial-gradient(circle at 50% 42%, #ffffff0a, #ffffff03 70%);
+    transform:translate(calc(var(--x) - 50%), calc(var(--y) - 50%));
+    transition:border-color .3s, box-shadow .3s, background-color .3s}
+.plate.has-fork{border-color:#7dd3fc99;background:#38bdf80f}
+.plate.hint{border-color:var(--eat);border-style:solid;box-shadow:0 0 22px #10b98166;animation:platePulse 1.1s ease-in-out infinite}
+.plate.ghost{border-color:#f59e0b88}
+@keyframes platePulse{0%,100%{box-shadow:0 0 0 3px #10b98126,0 0 22px #10b98166}50%{box-shadow:0 0 0 9px #10b9810f,0 0 26px #10b98145}}
+
+/* 哲学家：宿主只管定位，视觉与动画交给内层 .pb。
+   定位补间(transform)与状态动画(scale/脉冲)分属两个元素，才不会互相打断造成浮动抖动 */
+.phil{position:absolute;left:0;top:0;width:88px;height:88px;padding:0;border:0;background:none;cursor:pointer;
+    font:inherit;color:#fff;display:grid;place-content:center;
+    transform:translate(calc(var(--x) - 50%), calc(var(--y) - 50%));
+    transition:transform var(--dur) var(--ease), opacity .3s;will-change:transform}
+.phil:focus-visible{outline:none}
+.phil:focus-visible .pb{outline:2px solid var(--accent);outline-offset:4px}
+.pb{position:relative;width:88px;height:88px;border-radius:50%;border:3px solid;background:#1e293b;
+    display:grid;place-content:center;gap:3px;text-align:center;padding:0 6px;
+    transition:scale .22s var(--ease), background-color .35s var(--ease), border-color .35s var(--ease), box-shadow .35s}
+.phil:hover .pb{scale:1.07}
+.phil:active .pb{scale:.95}
+.pb b{font-size:13px;font-weight:650;letter-spacing:.02em;line-height:1.15}
+.pb small{display:block;font-size:9.5px;font-weight:500;opacity:.9;letter-spacing:.02em}
+.phil.thinking .pb{background:#1e40af;border-color:var(--think)}
+.phil.hungry .pb{background:#8a4b0b;border-color:var(--hungry)}
+.phil.eating .pb{background:#06694c;border-color:var(--eat);animation:breathe 1.6s ease-in-out infinite}
+.phil.dim{opacity:.34}
+.phil.pick .pb{box-shadow:0 0 0 4px #38bdf83d, 0 0 26px #38bdf86b}
+/* 饥饿脉冲：伪元素环只动 opacity/scale，交给合成器，不逐帧重绘 box-shadow */
+.pb::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--hungry);opacity:0;pointer-events:none}
+.phil.hungry .pb::after{animation:want 1.5s ease-in-out infinite}
+@keyframes want{0%{opacity:.5;scale:1}70%,100%{opacity:0;scale:1.24}}
+@keyframes breathe{0%,100%{scale:1}50%{scale:1.045}}
+.deadlock .phil.hungry{animation:jitter .42s ease-in-out infinite}
+@keyframes jitter{0%,100%{translate:0 0}25%{translate:-2px 1px}75%{translate:2px -1px}}
+
+/* 筷子：宿主负责定位+旋转，.sk 画本体；拖拽态一定由 endDrag 兜底清除 */
+.stick{position:absolute;left:0;top:0;width:12px;height:64px;padding:0;border:0;background:none;cursor:grab;overflow:visible;
+    transform:translate(calc(var(--x) - 50%), calc(var(--y) - 50%)) rotate(var(--rot,0deg));
+    transition:transform var(--dur) var(--ease);will-change:transform}
+.stick::before{content:"";position:absolute;inset:-16px -20px;border-radius:14px}  /* 放大拖拽命中区 */
+.sk{position:absolute;inset:0;border-radius:6px/3px;background:linear-gradient(180deg,#e2e8f0,var(--stick) 45%,#8d9db4);
+    box-shadow:0 3px 10px #0006;transition:scale .2s var(--ease), background-color .3s, box-shadow .3s}
+.stick:hover .sk{scale:1.12}
+.stick:focus-visible{outline:none}
+.stick:focus-visible .sk{outline:2px solid var(--accent);outline-offset:6px}
+.stick .tag{position:absolute;top:-20px;left:-12px;width:36px;text-align:center;font-size:10.5px;font-weight:600;color:var(--dim);
+    transform:rotate(calc(-1 * var(--rot,0deg)));pointer-events:none;letter-spacing:.03em}
+.stick.held{pointer-events:none;cursor:default}
+.stick.held .sk{background:linear-gradient(180deg,#fdba74,var(--stick-held) 55%,#c2410c);box-shadow:0 4px 14px #ea580c4d}
+.stick.dragging{transition:none;z-index:6}
+.stick.dragging .sk{scale:1.35;box-shadow:0 14px 30px #000a;filter:brightness(1.12)}
+.stick.wanted .sk{animation:stickWant .75s ease-in-out infinite}
+@keyframes stickWant{0%,100%{box-shadow:0 3px 10px #0006}50%{box-shadow:0 0 0 5px #38bdf840, 0 6px 20px #38bdf870}}
+
+/* 思想气泡：常驻每位哲学家外侧。思考=名言，饥饿=要吃饭，卡住=一根筷子没法用，进餐=咀嚼 */
+.bub{position:absolute;left:0;top:0;width:160px;padding:7px 10px;border-radius:12px;
+    font-size:12.5px;line-height:1.45;text-align:center;color:#dbe6f7;
+    background:#101c2f;border:1px solid #33507a;box-shadow:0 8px 24px #0008;
+    transform:translate(calc(var(--x) - 50%), calc(var(--y) - 50%)) scale(.92);
+    transform-origin:var(--ox,50%) var(--oy,50%);
+    opacity:0;pointer-events:none;
+    transition:opacity .35s var(--ease), transform .35s var(--ease), border-color .3s, background-color .3s, color .3s}
+.bub.show{opacity:1;transform:translate(calc(var(--x) - 50%), calc(var(--y) - 50%)) scale(1)}
+.bub.hungry{border-color:var(--hungry);background:#2a1c07;color:#fde3b8}
+.bub.eating{border-color:var(--eat);background:#08251c;color:#b7f2d8}
+.bub.blocked{border-color:var(--danger);background:#2a1013;color:#fca5a5}
+.tail{stroke:#40587c;stroke-width:1.5;stroke-dasharray:2 5;opacity:0;transition:opacity .35s}
+.tail.show{opacity:.8}
+
+/* 覆盖层 */
+.banner{position:absolute;left:50%;top:8px;transform:translate(-50%,-14px);opacity:0;pointer-events:none;
+    background:#7f1d1d;border:1px solid #ef4444;color:#fff;padding:7px 14px;border-radius:999px;font-size:13.5px;font-weight:650;
+    transition:opacity .35s, transform .35s var(--ease);box-shadow:0 10px 30px #ef444440;white-space:nowrap}
+.deadlock .banner{opacity:1;transform:translate(-50%,0)}
+.hint{margin:10px auto 0;max-width:780px;text-align:center;color:var(--dim);font-size:12.5px;min-height:18px;transition:color .3s}
+
+/* ---------- 控件 ---------- */
+.seg{display:grid;gap:6px;margin-bottom:12px}
+.seg.two{grid-template-columns:1fr 1fr}
+.seg.three{grid-template-columns:repeat(3,1fr)}
+.seg button{padding:9px 6px;border-radius:10px;border:1px solid var(--line);background:#0d1728;color:var(--dim);
+    font:inherit;font-size:13px;cursor:pointer;transition:background-color .25s, color .25s, border-color .25s, transform .12s}
+.seg button:hover{color:var(--ink);border-color:#3b5178}
+.seg button:active{transform:translateY(1px)}
+.seg button[aria-pressed=true]{background:#123a5c;border-color:var(--accent);color:#e0f2fe;box-shadow:inset 0 0 0 1px #38bdf855}
+.note{font-size:12.5px;color:var(--dim);margin:0 0 12px;padding:10px 12px;border-left:3px solid var(--accent);background:#0d1728;border-radius:0 10px 10px 0}
+.note.danger{border-left-color:var(--danger);background:#241115}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.btn{padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#152238;color:var(--ink);font:inherit;font-size:14px;cursor:pointer;
+    transition:background-color .22s, border-color .22s, transform .12s}
+.btn:hover{background:#1c2d4a;border-color:#3b5178}
+.btn:active{transform:translateY(1px)}
+.btn.go{background:#0f7a55;border-color:var(--eat);color:#eafff7}
+.btn.go.running{background:#0e5f8a;border-color:var(--accent)}
+.speed{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:12.5px;color:var(--dim)}
+.speed input[type=range]{flex:1;accent-color:var(--accent)}
+.toggle{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12.5px;color:var(--dim);cursor:pointer}
+.toggle input{accent-color:var(--accent);width:15px;height:15px}
+.keys{margin-top:12px;font-size:12px;color:#7488a6;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.keys kbd{background:#0d1728;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font:inherit;font-size:11.5px;color:var(--ink)}
+
+/* ---------- 统计 ---------- */
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.stat{background:#0d1728;padding:9px 6px;text-align:center}
+.stat b{display:block;font-size:19px;font-variant-numeric:tabular-nums}
+.stat span{font-size:11.5px;color:var(--dim)}
+.stat.free b{color:var(--accent)} .stat.hungry b{color:var(--hungry)} .stat.eat b{color:var(--eat)} .stat.bad b{color:var(--danger)}
+
+/* ---------- 日志 ---------- */
+.log-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:12px;flex-wrap:wrap}
+.log{height:188px;overflow-y:auto;background:#08101d;border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:13px}
+.log::-webkit-scrollbar{width:9px} .log::-webkit-scrollbar-thumb{background:#26364f;border-radius:9px}
+.line{display:flex;gap:9px;padding:2px 0;animation:slide .25s var(--ease);color:var(--dim)}
+.line time{color:#5d7392;font-variant-numeric:tabular-nums;flex:0 0 78px;font-size:12px}
+.line span{min-width:0}
+@keyframes slide{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:none}}
+.line.pick{color:#bae6fd} .line.drop{color:#a7f3d0} .line.eat{color:#6ee7b7;font-weight:600}
+.line.warn{color:#fcd34d} .line.bad{color:#fca5a5;font-weight:650} .line.reset{color:#cbd5e1}
+.mini{padding:5px 10px;font-size:12px;border-radius:8px}
+
+@media (prefers-reduced-motion:reduce){ *{animation:none!important; transition-duration:.01ms!important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+    <header class="top">
+        <div>
+            <h1>哲学家进餐 <em>·</em> 并发死锁可视化</h1>
+            <p class="sub">苏格拉底、柏拉图、亚里士多德、尼采、庄子围坐一桌，共用 5 根筷子，每人必须同时拿到左右相邻的两根才能进餐。思考时冒出自己的名言，饿了就喊要吃饭。映射关系：哲学家 = AI Agent 推理任务，筷子 = GPU 显存 / KV 缓存，进餐 = 大模型推理。</p>
+        </div>
+        <div class="chips">
+            <span class="chip"><i class="dot" style="background:var(--think)"></i>思考</span>
+            <span class="chip"><i class="dot" style="background:var(--hungry)"></i>饥饿等待</span>
+            <span class="chip"><i class="dot" style="background:var(--eat)"></i>进餐中</span>
+            <span class="chip"><i class="dot" style="background:var(--stick)"></i>筷子在桌</span>
+            <span class="chip"><i class="dot" style="background:var(--stick-held)"></i>筷子已持有</span>
+        </div>
+    </header>
+
+    <main>
+        <section class="card stage-card">
+            <div class="stage" id="stage">
+                <div class="world" id="world">
+                    <div class="table"></div>
+                    <div class="vignette"></div>
+                    <svg class="links" viewBox="0 0 900 900" aria-hidden="true">
+                        <defs>
+                            <marker id="ah-warm" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                                <path d="M0 0 L10 5 L0 10 z" fill="#7d92b0"></path>
+                            </marker>
+                            <marker id="ah-hot" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                                <path d="M0 0 L10 5 L0 10 z" fill="#ef4444"></path>
+                            </marker>
+                        </defs>
+                        <g id="tailLayer"></g>
+                        <g id="linkLayer"></g>
+                    </svg>
+                </div>
+                <div class="banner">检测到死锁：五人各持一根筷子循环等待</div>
+            </div>
+            <p class="hint" id="hint"></p>
+        </section>
+
+        <aside class="col">
+            <section class="card">
+                <h2>运行模式</h2>
+                <div class="seg two" id="modeSeg">
+                    <button type="button" data-mode="auto" aria-pressed="true">自动模拟</button>
+                    <button type="button" data-mode="manual" aria-pressed="false">拖拽交互</button>
+                </div>
+                <h2>防死锁策略</h2>
+                <div class="seg three" id="algoSeg">
+                    <button type="button" data-algo="original" aria-pressed="true">原始</button>
+                    <button type="button" data-algo="limit4" aria-pressed="false">限四人</button>
+                    <button type="button" data-algo="oddEven" aria-pressed="false">奇偶序</button>
+                </div>
+                <p class="note" id="algoNote"></p>
+                <div class="row">
+                    <button class="btn go" id="runBtn" type="button">自动运行</button>
+                    <button class="btn" id="stepBtn" type="button">单步执行</button>
+                </div>
+                <div class="row" style="margin-top:8px">
+                    <button class="btn" id="resetBtn" type="button">重置餐桌</button>
+                    <button class="btn mini" id="logClearBtn" type="button">清空日志</button>
+                </div>
+                <label class="speed">节奏 <input type="range" id="speedRange" min="300" max="2200" step="100" value="1100"><span id="speedVal">1.1s</span></label>
+                <label class="toggle"><input type="checkbox" id="linkToggle" checked>显示“谁在等谁”的关系箭头</label>
+                <label class="toggle"><input type="checkbox" id="bubbleToggle" checked>显示思想气泡（思考=名言，饿=要吃饭）</label>
+                <div class="keys"><kbd>空格</kbd>单步<kbd>P</kbd>运行<kbd>R</kbd>重置<kbd>Tab</kbd>聚焦<kbd>Enter</kbd>交互</div>
+            </section>
+
+            <section class="card">
+                <h2>实时状态</h2>
+                <div class="stats">
+                    <div class="stat free"><b id="sFree">5</b><span>筷子在桌</span></div>
+                    <div class="stat"><b id="sThink">5</b><span>思考中</span></div>
+                    <div class="stat hungry"><b id="sHungry">0</b><span>饥饿等待</span></div>
+                    <div class="stat eat"><b id="sEat">0</b><span>进餐中</span></div>
+                    <div class="stat"><b id="sSteps">0</b><span>推进轮次</span></div>
+                    <div class="stat bad"><b id="sDead">0</b><span>死锁次数</span></div>
+                </div>
+                <div class="stats" style="grid-template-columns:1fr;margin-top:1px">
+                    <div class="stat"><b id="sMeals">0</b><span>累计完成进餐 · 吞吐指标</span></div>
+                </div>
+            </section>
+        </aside>
+    </main>
+
+    <section class="card log-card">
+        <div class="log-head">
+            <h2 style="margin:0">事件日志</h2>
+            <span class="chip" style="font-size:12px">灰色虚线 = 等待桌上的筷子 · 红色流动 = 循环等待（死锁链）</span>
+        </div>
+        <div class="log" id="logBox" aria-live="polite"></div>
+    </section>
+</div>
+
+<script>
+const THINKING = "thinking";
+const HUNGRY = "hungry";
+const EATING = "eating";
+const N = 5;
+
+// 固定 900x900 逻辑坐标系，再由 ResizeObserver 整体缩放到舞台宽度
+const W = 900, C = 450, R_PHIL = 228, R_PLATE = 176, R_STICK = 134, PLATE_HIT = 78, PHIL_HIT = 62;
+
+// 五位哲学家：思考时冒名言，饿了喊吃饭
+const PHILO = [
+    { name: "苏格拉底", think: ["我唯一知道的，就是我一无所知。", "未经审视的生活不值得过。", "今天该拉住谁问一个问题？", "先别急，让我定义一下什么叫“吃饭”。"] },
+    { name: "柏拉图",   think: ["我们是不是都只是洞穴里的影子？", "理想的城邦，应当由哲人王治理。", "碗里这碗饭，只是“理念之饭”的摹本。", "知识是灵魂对理念的回忆。"] },
+    { name: "亚里士多德", think: ["人是天生的政治动物。", "幸福是合乎德性的实现活动。", "为什么石头向下落，而火向上烧？", "一切德性都在两个极端之间取中道。"] },
+    { name: "尼采",     think: ["上帝死了，我们拿什么填补？", "凡不能毁灭我的，必使我更强大。", "要成为你自己！", "是时候重新估价一切价值了。"] },
+    { name: "庄子",     think: ["不知周之梦为胡蝶与，胡蝶之梦为周与？", "子非鱼，安知鱼之乐？", "天地与我并生，而万物与我为一。", "无用之用，方为大用。"] },
+];
+const HUNGRY_LINE = ["我饿了，要吃饭！", "该吃饭了——哲学也得先喂饱肚子。", "我饿了，要吃饭！谁把饭端上来？", "饿是要吃饭，这不是逻辑必然，是生理必然。", "我饿了，要吃饭！别跟我谈理念。"];
+const BLOCKED_LINE = ["手里一根、对面一根，这饭怎么吃！", "持一筷等一筷，我就这么卡住了。", "一根筷子夹不起花生米啊！"];
+const EATING_LINE = ["唔唔唔……（嚼嚼嚼）", "吃饭不聊天，专心干饭。", "真香。", "边吃边想：这算不算幸福？"];
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const who = (pid) => `${PHILO[pid].name}·P${pid}`;
+
+let phil = [];
+let fork = [];              // fork[fid] 是否已被拿走
+let forkOwner = [];         // forkOwner[fid] = 持有者 pid，-1 在桌上
+let algorithm = "original";
+let simMode = "auto";
+let autoTimer = null;
+let speed = 1100;
+let steps = 0, meals = 0, deadlocks = 0;
+let showLinks = true, showBubbles = true;
+let dragFid = null, dragOX = 0, dragOY = 0, dragStartWX = 0, dragStartWY = 0;
+let hoverFid = null, hoverPid = null;
+let scale = 1;
+let built = false;
+
+const stageEl = document.getElementById("stage");
+const worldEl = document.getElementById("world");
+const logBox = document.getElementById("logBox");
+const hintEl = document.getElementById("hint");
+const linkLayer = document.getElementById("linkLayer");
+const runBtn = document.getElementById("runBtn");
+let philEls = [], plateEls = [], stickEls = [], subEls = [], linkEls = [], bubEls = [], tailEls = [];
+
+const ALGO_NOTE = {
+    original: { t: "原始版本：先拿左筷、再拿右筷。五人同时饥饿时各持一根循环等待 → 死锁。", danger: true },
+    limit4:   { t: "资源配额：最多 4 人同时申请筷子，必有一人能凑齐两根 → 结构性不死锁。", danger: false },
+    oddEven:  { t: "破坏环路等待：偶数号先左后右、奇数号先右后左，取用顺序不成环 → 不死锁。", danger: false },
+};
+
+// 哲学家 pid 的左右筷子
+function getForkPair(pid){
+    return { leftFork:(pid - 1 + N) % N, rightFork:pid };
+}
+// 筷子 fid 两端相邻的哲学家（与渲染一致：F[i] 位于 P[i] 与 P[i+1] 之间）
+function getForkNeighborPhil(fid){
+    return [fid, (fid + 1) % N];
+}
+
+const angOf = (i) => (i * 72 - 90) * Math.PI / 180;
+function platePos(pid){
+    const a = angOf(pid);
+    return { x: C + R_PLATE * Math.cos(a), y: C + R_PLATE * Math.sin(a), deg: pid * 72 - 90 };
+}
+function philPos(pid){
+    const a = angOf(pid);
+    return { x: C + R_PHIL * Math.cos(a), y: C + R_PHIL * Math.sin(a) };
+}
+function stickRest(fid){
+    const deg = fid * 72 + 36 - 90, a = deg * Math.PI / 180;
+    return { x: C + R_STICK * Math.cos(a), y: C + R_STICK * Math.sin(a), rot: deg - 90 };
+}
+// 气泡锚点：沿半径向外。越接近水平方向推得越远，否则宽气泡的下角会压到自己的圆圈上。
+function bubblePos(pid){
+    const a = angOf(pid), dx = Math.cos(a), dy = Math.sin(a);
+    const off = 70 + Math.abs(dx) * 76;
+    const r = R_PHIL + off;
+    return { x: C + r * dx, y: C + r * dy, dx, dy, off };
+}
+// 持有时落在主人餐盘内：两根沿切线错开并略微扇形张开
+function stickHeldPos(fid){
+    const pid = forkOwner[fid], p = platePos(pid);
+    const a = angOf(pid), idx = Math.max(0, phil[pid].holdForks.indexOf(fid));
+    const off = idx === 0 ? -14 : 14;
+    return { x: p.x - Math.sin(a) * off, y: p.y + Math.cos(a) * off, rot: p.deg - 90 + off * 0.45 };
+}
+
+// ===== 写入一律走"值没变就不碰 DOM"的缓存：重复赋 className 会重启 CSS 动画，表现为浮动卡顿 =====
+function setClass(el, v){ if (el.__cls !== v){ el.__cls = v; el.className = v; } }
+function setText(el, v){ if (el.__txt !== v){ el.__txt = v; el.innerText = v; } }
+function setVar(el, k, v){ const c = el.__v || (el.__v = {}); if (c[k] !== v){ c[k] = v; el.style.setProperty(k, v); } }
+function setAttr(el, k, v){ const c = el.__a || (el.__a = {}); if (c[k] !== v){ c[k] = v; el.setAttribute(k, v); } }
+function setTip(el, v){ if (el.__tip !== v){ el.__tip = v; el.title = v; } }
+
+// ===== 结构只建一次，之后仅改类名与自定义属性，补间动画才有效 =====
+function buildStage(){
+    if (built) return;
+    for (let i = 0; i < N; i++){
+        const plate = document.createElement("div");
+        setClass(plate, "plate");
+        const pp = platePos(i);
+        setVar(plate, "--x", pp.x + "px");
+        setVar(plate, "--y", pp.y + "px");
+        plate.title = `P${i} 的餐盘`;
+        plate.onpointerenter = () => { if (dragFid === null){ hoverPid = i; syncView(); } };
+        plate.onpointerleave = () => { if (hoverPid === i) hoverPid = null; syncView(); };
+        plate.onclick = () => clickPhil(i);
+        worldEl.appendChild(plate);
+        plateEls.push(plate);
+    }
+    for (let i = 0; i < N; i++){
+        const p = philPos(i);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        setClass(btn, "phil " + THINKING);
+        setVar(btn, "--x", p.x + "px");
+        setVar(btn, "--y", p.y + "px");
+        const body = document.createElement("div");
+        body.className = "pb";
+        const nm = document.createElement("b");
+        nm.innerText = PHILO[i].name;
+        const sub = document.createElement("small");
+        body.appendChild(nm);
+        body.appendChild(sub);
+        btn.appendChild(body);
+        btn.onclick = () => clickPhil(i);
+        btn.onpointerenter = () => { hoverPid = i; syncView(); };
+        btn.onpointerleave = () => { if (hoverPid === i) hoverPid = null; syncView(); };
+        worldEl.appendChild(btn);
+        philEls.push(btn); subEls.push(sub);
+    }
+    for (let fid = 0; fid < N; fid++){
+        const s = stickRest(fid);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        setClass(btn, "stick");
+        setVar(btn, "--x", s.x + "px");
+        setVar(btn, "--y", s.y + "px");
+        setVar(btn, "--rot", s.rot + "deg");
+        const core = document.createElement("span");
+        core.className = "sk";
+        btn.appendChild(core);
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        setText(tag, "筷" + fid);
+        btn.appendChild(tag);
+        btn.setAttribute("aria-label", "筷" + fid);
+        btn.onpointerdown = (e) => dragStart(e, fid);
+        btn.onpointerenter = () => { if (dragFid === null){ hoverFid = fid; syncView(); } };
+        btn.onpointerleave = () => { if (hoverFid === fid){ hoverFid = null; syncView(); } };
+        btn.onclick = () => { if (simMode === "manual" && !dragMovedFlag) giveByClick(fid); };
+        worldEl.appendChild(btn);
+        stickEls.push(btn);
+    }
+    const tailLayer = document.getElementById("tailLayer");
+    for (let i = 0; i < N; i++){
+        const b = bubblePos(i);
+        const bub = document.createElement("div");
+        setClass(bub, "bub");
+        setVar(bub, "--x", b.x + "px");
+        setVar(bub, "--y", b.y + "px");
+        setVar(bub, "--ox", (50 - b.dx * 50).toFixed(1) + "%");
+        setVar(bub, "--oy", (50 - b.dy * 50).toFixed(1) + "%");
+        setText(bub, PHILO[i].think[0]);
+        worldEl.appendChild(bub);
+        bubEls.push(bub);
+
+        const tail = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        const t1 = R_PHIL + 46, t2 = R_PHIL + b.off - 25;
+        tail.setAttribute("x1", (C + t1 * b.dx).toFixed(1));
+        tail.setAttribute("y1", (C + t1 * b.dy).toFixed(1));
+        tail.setAttribute("x2", (C + t2 * b.dx).toFixed(1));
+        tail.setAttribute("y2", (C + t2 * b.dy).toFixed(1));
+        setAttr(tail, "class", "tail");
+        tailLayer.appendChild(tail);
+        tailEls.push(tail);
+    }
+    for (let i = 0; i < N; i++){
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("class", "link");
+        linkLayer.appendChild(path);
+        linkEls.push(path);
+    }
+    built = true;
+}
+
+function init(){
+    stopAuto();
+    logBox.innerHTML = "";
+    phil = []; fork = []; forkOwner = [];
+    for (let i = 0; i < N; i++){
+        phil.push({ id:i, state:THINKING, holdForks:[],
+            thought: pick(PHILO[i].think), cry: pick(HUNGRY_LINE), grumble: pick(BLOCKED_LINE), munch: pick(EATING_LINE) });
+        fork.push(false); forkOwner.push(-1);
+    }
+    steps = 0; meals = 0; deadlocks = 0;
+    endDrag(); hoverFid = null; hoverPid = null;
+    buildStage();
+    syncView();
+    addLog("餐桌初始化完成，模式：" + (simMode === "manual" ? "拖拽交互" : "自动模拟"), "reset");
+    if (simMode === "auto") setRun(true);
+}
+
+function addLog(text, kind){
+    const div = document.createElement("div");
+    div.className = "line" + (kind ? " " + kind : "");
+    const time = document.createElement("time");
+    time.innerText = new Date().toTimeString().slice(0, 8);
+    const msg = document.createElement("span");
+    msg.innerText = text;
+    div.appendChild(time); div.appendChild(msg);
+    logBox.appendChild(div);
+    while (logBox.children.length > 160) logBox.removeChild(logBox.firstChild);
+    logBox.scrollTop = logBox.scrollHeight;
+}
+
+function checkDeadlock(){
+    return phil.length === N && phil.every(p => p.state === HUNGRY) && fork.every(f => f === true);
+}
+
+// ===== 自动推进 =====
+function tryPickFork(pid){
+    const p = phil[pid];
+    if (p.state !== HUNGRY) return false;
+    const { leftFork, rightFork } = getForkPair(pid);
+
+    if (algorithm === "original"){
+        if (!fork[leftFork]){
+            takeFork(pid, leftFork, "左");
+            if (!fork[rightFork]){
+                takeFork(pid, rightFork, "右");
+                startEating(pid);
+                return true;
+            }
+            addLog(`${who(pid)} 持筷${leftFork} 等待筷${rightFork}（占用-等待，死锁诱因）`, "warn");
+            return false;
+        }
+    } else if (algorithm === "limit4"){
+        const holding = fork.filter(x => x === true).length;
+        if (holding >= 4){ addLog(`${who(pid)} 申请资源：已有 4 人持筷，排队等待`, "warn"); return false; }
+        if (!fork[leftFork] && !fork[rightFork]){
+            takeFork(pid, leftFork, "左"); takeFork(pid, rightFork, "右");
+            startEating(pid, "配额内一次取两根");
+            return true;
+        }
+    } else if (algorithm === "oddEven"){
+        const first = pid % 2 === 0 ? leftFork : rightFork;
+        const second = pid % 2 === 0 ? rightFork : leftFork;
+        if (!fork[first] && !fork[second]){
+            takeFork(pid, first, pid % 2 === 0 ? "左" : "右");
+            takeFork(pid, second, pid % 2 === 0 ? "右" : "左");
+            startEating(pid, pid % 2 === 0 ? "偶数号先左后右" : "奇数号先右后左");
+            return true;
+        }
+    }
+    return false;
+}
+
+// 进入饥饿时换一批台词，气泡内容才不会被 syncView 反复重摇（那会破坏幂等写入）
+function goHungry(pid){
+    const p = phil[pid];
+    p.state = HUNGRY;
+    p.cry = pick(HUNGRY_LINE);
+    p.grumble = pick(BLOCKED_LINE);
+}
+function takeFork(pid, fid, side){
+    fork[fid] = true; forkOwner[fid] = pid; phil[pid].holdForks.push(fid);
+    addLog(`${who(pid)} 拿起${side}侧筷${fid}`, "pick");
+}
+function startEating(pid, why){
+    phil[pid].state = EATING;
+    phil[pid].munch = pick(EATING_LINE);
+    addLog(`${who(pid)} 两筷齐备，开始进餐${why ? "（" + why + "）" : ""}`, "eat");
+}
+function putDownFork(pid){
+    const { leftFork, rightFork } = getForkPair(pid);
+    [leftFork, rightFork].forEach(fid => { fork[fid] = false; forkOwner[fid] = -1; });
+    phil[pid].holdForks = [];
+    phil[pid].state = THINKING;
+    phil[pid].thought = pick(PHILO[pid].think);
+    meals++;
+    addLog(`${who(pid)} 进餐完成，归还筷${leftFork}、筷${rightFork} → 回到思考`, "drop");
+}
+
+function step(){
+    if (checkDeadlock()) return;
+    steps++;
+    const randId = Math.floor(Math.random() * N);
+    const p = phil[randId];
+    if (p.state === THINKING){
+        goHungry(randId);
+        addLog(`${who(randId)} 思考结束 → 饥饿，申请资源`, "warn");
+        tryPickFork(randId);
+    } else if (p.state === HUNGRY){
+        tryPickFork(randId);
+    } else if (p.state === EATING){
+        putDownFork(randId);
+    }
+    if (checkDeadlock()){
+        deadlocks++;
+        addLog("检测到死锁！五人各持一根筷子形成循环等待，无人能进餐", "bad");
+        stopAuto();
+        setRun(false);
+    }
+    syncView();
+}
+
+function setRun(on){
+    if (on){ stopAuto(); autoTimer = setInterval(step, speed); }
+    else stopAuto();
+    runBtn.innerText = on ? "暂停运行" : "自动运行";
+    runBtn.classList.toggle("running", on);
+}
+function stopAuto(){ if (autoTimer) clearInterval(autoTimer); autoTimer = null; }
+
+// ===== 手动交互 =====
+function clickPhil(pid){
+    const p = phil[pid];
+    const { leftFork, rightFork } = getForkPair(pid);
+    if (p.state === THINKING){
+        goHungry(pid);
+        addLog(`${who(pid)} 思考 → 饥饿，需要相邻的筷${leftFork} 与 筷${rightFork}`, "warn");
+    } else if (p.state === EATING){
+        putDownFork(pid);
+    } else {
+        addLog(`${who(pid)} 已饥饿（持 ${p.holdForks.length}/2），已高亮它需要的筷${leftFork}、筷${rightFork}`, "pick");
+    }
+    if (checkDeadlock()){ deadlocks++; addLog("检测到死锁！五人各持一根筷子形成循环等待", "bad"); }
+    syncView();
+}
+
+function toWorld(evt){
+    const r = stageEl.getBoundingClientRect();
+    return { x: (evt.clientX - r.left) / scale, y: (evt.clientY - r.top) / scale };
+}
+let dragMovedFlag = false;
+
+// 兜底清理：拖拽态一旦残留，筷子会卡在放大+倾斜+无补间的状态里，看起来就像"飞出页面"
+function endDrag(){
+    window.removeEventListener("pointermove", onWinMove);
+    window.removeEventListener("pointerup", onWinUp);
+    window.removeEventListener("pointercancel", onWinUp);
+    dragFid = null;                    // 类名交回 syncView 统一写，不在这里动 classList
+}
+// 关键：move/up 挂在 window 上。挂在自己身上时要靠指针捕获，光标跑得比筷子快、
+// 或松手时命中的是别的元素，dragEnd 就不会触发，筷子被丢在半路。
+function onWinMove(evt){ if (dragFid !== null) dragMove(evt, dragFid); }
+function onWinUp(evt){
+    if (dragFid === null) return;
+    if (evt.type === "pointercancel"){ endDrag(); addLog("拖拽被中断，筷子已放回", "warn"); syncView(); return; }
+    dragEnd(evt, dragFid);
+}
+
+function dragStart(evt, fid){
+    if (simMode !== "manual" || fork[fid]) return;
+    if (dragFid !== null) endDrag();
+    const w = toWorld(evt), s = stickRest(fid);
+    dragFid = fid; dragMovedFlag = false;
+    dragOX = w.x - s.x; dragOY = w.y - s.y;
+    dragStartWX = w.x; dragStartWY = w.y;
+    const el = stickEls[fid];
+    setVar(el, "--rot", (s.rot - 18) + "deg");
+    window.addEventListener("pointermove", onWinMove);
+    window.addEventListener("pointerup", onWinUp);
+    window.addEventListener("pointercancel", onWinUp);
+    syncView();
+}
+function dragMove(evt, fid){
+    if (dragFid !== fid) return;
+    const w = toWorld(evt);
+    if (Math.hypot(w.x - dragStartWX, w.y - dragStartWY) > 5) dragMovedFlag = true;
+    const el = stickEls[fid];
+    setVar(el, "--x", (w.x - dragOX) + "px");
+    setVar(el, "--y", (w.y - dragOY) + "px");
+}
+// 落点判定同时看"指针"和"筷子中心"：用户是拿光标对准餐盘的，抓取偏移不该让合法落点失效
+function findDropTarget(fid, px, py, sx, sy){
+    for (const pid of getForkNeighborPhil(fid)){
+        if (phil[pid].state !== HUNGRY) continue;
+        const pl = platePos(pid), ph = philPos(pid);
+        const hit = [[px, py], [sx, sy]].some(([x, y]) =>
+            Math.hypot(x - pl.x, y - pl.y) < PLATE_HIT || Math.hypot(x - ph.x, y - ph.y) < PHIL_HIT);
+        if (hit) return pid;
+    }
+    return null;
+}
+function dragEnd(evt, fid){
+    if (dragFid !== fid) return;
+    const w = toWorld(evt);
+    const dropX = w.x - dragOX, dropY = w.y - dragOY;
+    const moved = dragMovedFlag;
+    endDrag();
+
+    const target = moved ? findDropTarget(fid, w.x, w.y, dropX, dropY) : null;
+    if (moved && target === null) addLog(`筷${fid} 落点无效：只能交给相邻的饥饿哲学家 ${who(fid)} 或 ${who((fid + 1) % N)}，已弹回桌面`, "warn");
+    if (target !== null) giveFork(target, fid);
+
+    // 以“松手位置”为补间起点，下一帧再写回目标坐标 → 飞行/回弹动画
+    requestAnimationFrame(() => syncView());
+    if (checkDeadlock()){ deadlocks++; addLog("检测到死锁！五人各持一根筷子形成循环等待", "bad"); syncView(); }
+}
+function giveByClick(fid){
+    const cands = getForkNeighborPhil(fid).filter(pid => phil[pid].state === HUNGRY);
+    if (cands.length === 1) giveFork(cands[0], fid);
+    else if (cands.length > 1) addLog(`筷${fid} 两侧哲学家都在等待，请拖到指定餐盘`, "warn");
+    else addLog(`筷${fid} 两端哲学家都不饿 → 无人可申请该资源`, "warn");
+    syncView();
+}
+function giveFork(pid, fid){
+    fork[fid] = true; forkOwner[fid] = pid; phil[pid].holdForks.push(fid);
+    addLog(`筷${fid} 交给 ${who(pid)}（餐盘内 ${phil[pid].holdForks.length}/2）`, "drop");
+    if (phil[pid].holdForks.length === 2) startEating(pid, "手动凑齐两根");
+    syncView();
+}
+
+// ===== 视图同步 =====
+function syncView(){
+    const dead = checkDeadlock();
+    stageEl.classList.toggle("deadlock", dead);
+
+    const activeStick = dragFid !== null ? dragFid : hoverFid;
+    const neighbors = activeStick !== null ? getForkNeighborPhil(activeStick) : [];
+    const wanted = new Set();
+    if (simMode === "manual" && hoverPid !== null && phil[hoverPid].state === HUNGRY){
+        const { leftFork, rightFork } = getForkPair(hoverPid);
+        wanted.add(leftFork); wanted.add(rightFork);
+    }
+    const dragging = dragFid !== null;
+
+    phil.forEach((p, pid) => {
+        const el = philEls[pid];
+        if (!el) return;
+        const isTarget = dragging && neighbors.includes(pid) && p.state === HUNGRY;
+        setClass(el, "phil " + p.state
+            + (dragging && p.state !== HUNGRY ? " dim" : "")
+            + (!dragging && (isTarget || hoverPid === pid || (hoverFid !== null && neighbors.includes(pid))) ? " pick" : ""));
+        const { leftFork, rightFork } = getForkPair(pid);
+        setTip(el, `${PHILO[pid].name}（P${pid}）｜${p.state === EATING ? "进餐中" : p.state === HUNGRY ? "饥饿等待" : "思考中"}｜持有：${p.holdForks.length ? p.holdForks.map(f => "筷" + f).join("、") : "无"}`);
+        setText(subEls[pid], p.state === EATING ? "进餐中" : p.state === HUNGRY ? "等待 " + p.holdForks.length + "/2" : "思考中");
+
+        const plate = plateEls[pid];
+        const hovering = !dragging && hoverPid === pid && p.state === HUNGRY;
+        setClass(plate, "plate"
+            + (p.holdForks.length ? " has-fork" : "")
+            + (isTarget || hovering ? " hint" : "")
+            + (!dragging && hoverFid !== null && neighbors.includes(pid) ? " ghost" : ""));
+
+        // 气泡文案只读状态、不摇随机数，保证 syncView 幂等
+        const missing = [leftFork, rightFork].find(f => !p.holdForks.includes(f));
+        const blocked = p.state === HUNGRY && p.holdForks.length === 1 && missing !== undefined && fork[missing];
+        const say = p.state === EATING ? p.munch : p.state === HUNGRY ? (blocked ? p.grumble : p.cry) : p.thought;
+        setText(bubEls[pid], say);
+        setClass(bubEls[pid], showBubbles ? "bub show " + (blocked ? "blocked" : p.state) : "bub");
+        setAttr(tailEls[pid], "class", showBubbles ? "tail show" : "tail");
+    });
+
+    fork.forEach((held, fid) => {
+        const el = stickEls[fid];
+        if (!el) return;
+        // 类名统一由这里写，dragging 也算进去，避免 classList.add 与缓存互相绕过留下脏类
+        setClass(el, "stick" + (held ? " held" : "") + (dragFid === fid ? " dragging" : "") + (!held && wanted.has(fid) ? " wanted" : ""));
+        if (dragFid === fid) return;                  // 拖拽中的位置交给 pointermove
+        const at = held ? stickHeldPos(fid) : stickRest(fid);
+        setVar(el, "--x", at.x + "px");
+        setVar(el, "--y", at.y + "px");
+        setVar(el, "--rot", at.rot + "deg");
+        if (el.disabled !== held) el.disabled = held;
+    });
+
+    // 等待箭头：饥饿哲学家缺的那根筷子在谁手上
+    const linkSpec = [];
+    if (showLinks){
+        phil.forEach((p, pid) => {
+            if (p.state !== HUNGRY || linkSpec.length >= N) return;
+            const { leftFork, rightFork } = getForkPair(pid);
+            const missing = [leftFork, rightFork].find(f => !p.holdForks.includes(f));
+            if (missing === undefined || !fork[missing]) return;      // 缺的那根还在桌上：不必画
+            const holder = forkOwner[missing];
+            if (holder < 0 || holder === pid) return;
+            const a = platePos(pid), b = platePos(holder);
+            const cx = (a.x + b.x) / 2 + (C - (a.x + b.x) / 2) * 0.34;
+            const cy = (a.y + b.y) / 2 + (C - (a.y + b.y) / 2) * 0.34;
+            const hot = phil[holder].state === HUNGRY;
+            linkSpec.push({
+                d: `M${a.x.toFixed(1)} ${a.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}`,
+                cls: "link " + (hot ? "hot" : "warm"),
+                marker: hot ? "url(#ah-hot)" : "url(#ah-warm)",
+            });
+        });
+    }
+    linkEls.forEach((l, i) => {
+        const spec = linkSpec[i];
+        setAttr(l, "d", spec ? spec.d : "");
+        setAttr(l, "class", spec ? spec.cls : "link");
+        setAttr(l, "marker-end", spec ? spec.marker : "");
+    });
+
+    setText(document.getElementById("sFree"), fork.filter(f => !f).length);
+    setText(document.getElementById("sThink"), phil.filter(p => p.state === THINKING).length);
+    setText(document.getElementById("sHungry"), phil.filter(p => p.state === HUNGRY).length);
+    setText(document.getElementById("sEat"), phil.filter(p => p.state === EATING).length);
+    setText(document.getElementById("sSteps"), steps);
+    setText(document.getElementById("sMeals"), meals);
+    setText(document.getElementById("sDead"), deadlocks);
+    setText(hintEl, simMode === "manual"
+        ? (dead ? "已死锁：点击任意哲学家归位筷子，或切换上方策略后重试" : "点击哲学家使其饥饿 → 把相邻筷子拖进餐盘；单击空闲筷子可直接递给唯一等待方")
+        : (dead ? "已死锁：自动运行已停止，切换策略或重置后可继续" : "自动模式：每轮随机推进一位哲学家，对比三种策略的死锁次数与吞吐"));
+}
+
+// ===== 控件绑定 =====
+function pressGroup(sel, attr, value){
+    document.querySelectorAll(sel + " button").forEach(b => b.setAttribute("aria-pressed", b.dataset[attr] === value ? "true" : "false"));
+}
+document.getElementById("modeSeg").onclick = (e) => {
+    const b = e.target.closest ? e.target.closest("button") : null; if (!b || !b.dataset.mode) return;
+    simMode = b.dataset.mode;
+    pressGroup("#modeSeg", "mode", simMode);
+    init();
+};
+document.getElementById("algoSeg").onclick = (e) => {
+    const b = e.target.closest ? e.target.closest("button") : null; if (!b || !b.dataset.algo) return;
+    algorithm = b.dataset.algo;
+    pressGroup("#algoSeg", "algo", algorithm);
+    paintAlgoNote();
+    addLog("策略切换：" + b.innerText + " — " + ALGO_NOTE[algorithm].t, ALGO_NOTE[algorithm].danger ? "warn" : "pick");
+};
+function paintAlgoNote(){
+    const note = ALGO_NOTE[algorithm], el = document.getElementById("algoNote");
+    el.innerText = note.t;
+    el.classList.toggle("danger", note.danger);
+}
+runBtn.onclick = () => {
+    if (simMode === "manual"){ addLog("拖拽模式下由你决定取用顺序，自动运行不可用", "warn"); return; }
+    setRun(!autoTimer);
+};
+document.getElementById("stepBtn").onclick = () => step();
+document.getElementById("resetBtn").onclick = () => init();
+document.getElementById("logClearBtn").onclick = () => { logBox.innerHTML = ""; };
+document.getElementById("speedRange").oninput = (e) => {
+    speed = +e.target.value;
+    document.getElementById("speedVal").innerText = (speed / 1000).toFixed(1) + "s";
+    if (autoTimer) setRun(true);
+};
+document.getElementById("linkToggle").onchange = (e) => { showLinks = e.target.checked; syncView(); };
+document.getElementById("bubbleToggle").onchange = (e) => { showBubbles = e.target.checked; syncView(); };
+
+document.addEventListener("keydown", (e) => {
+    const t = e.target;
+    const typing = t && t.tagName === "INPUT" || t && t.tagName === "TEXTAREA";
+    if (typing) return;
+    if (e.code === "Space"){ if (t && t.tagName === "BUTTON") return; e.preventDefault(); step(); }
+    else if (e.key === "r" || e.key === "R") init();
+    else if (e.key === "p" || e.key === "P"){ if (simMode === "auto") setRun(!autoTimer); }
+});
+
+// 舞台缩放：逻辑坐标恒为 640，按容器宽度等比缩放
+function fitStage(){
+    scale = stageEl.clientWidth / W || 1;
+    worldEl.style.transform = "scale(" + scale + ")";
+}
+if (typeof ResizeObserver === "function") new ResizeObserver(fitStage).observe(stageEl);
+window.addEventListener("resize", fitStage);
+fitStage();
+
+paintAlgoNote();
+init();
+</script>
+</body>
+</html>
